@@ -189,7 +189,29 @@ jail_user() {
         fi
     fi
     
-    if jk_jailuser -v -j "$JAIL_ROOT" "$user"; then
+    # Create a jail directory for the user
+    local user_jail="$JAIL_ROOT/$user"
+    if [ ! -d "$user_jail" ]; then
+        mkdir -p "$user_jail"
+        jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors
+        
+        # Create necessary directories and copy shell
+        mkdir -p "$user_jail/usr/sbin"
+        cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"
+        chmod 755 "$user_jail/usr/sbin/jk_lsh"
+        
+        # Create /etc directory and add passwd/group files
+        mkdir -p "$user_jail/etc"
+        grep -E "^(root|nobody):" /etc/passwd > "$user_jail/etc/passwd"
+        grep -E "^(root|nobody):" /etc/group > "$user_jail/etc/group"
+        
+        # Set proper permissions
+        chown -R root:root "$user_jail"
+        chmod 755 "$user_jail"
+    fi
+    
+    # Jail the user without moving their home directory
+    if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh "$user"; then
         log "SUCCESS" "User $user jailed successfully"
     else
         log "ERROR" "Failed to jail user $user"
