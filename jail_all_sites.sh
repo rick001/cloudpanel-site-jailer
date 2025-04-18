@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 
 VERBOSE=false
 SKIP_CONFIRM=false
+FIX_MODE=false
 
 #################################
 # Utility functions
@@ -48,6 +49,7 @@ Options:
   -l, --log-file PATH  Custom log file
   -v, --verbose        Enable verbose
   -y, --yes            Skip confirmation
+  --fix                Fix users (restore original state)
 
 Example:
   $0 --db-path /path/db.sq3 --jail-root /custom/jail
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
             LOGFILE="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=true; shift ;;
         -y|--yes)     SKIP_CONFIRM=true; shift ;;
+        --fix)        FIX_MODE=true; shift ;;
         *)            log ERROR "Unknown option $1"; show_help ;;
     esac
 done
@@ -262,8 +265,8 @@ main() {
     check_root
     echo "DEBUG: After check_root" >&2
     
-    # Add option to fix users
-    if [ "$1" = "--fix" ]; then
+    # Check if we should fix users
+    if [ "${FIX_MODE:-false}" = "true" ]; then
         for u in $(get_site_users); do
             fix_user "$u"
         done
