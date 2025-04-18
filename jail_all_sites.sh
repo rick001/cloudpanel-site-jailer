@@ -171,6 +171,7 @@ unjail_user() {
 jail_user() {
     local u=$1 user_jail="$JAIL_ROOT/$u" real_home="/home/$u" jhome="$user_jail/home/$u"
     echo "DEBUG: Jailing user $u" >&2
+    echo "DEBUG: user_jail=$user_jail, real_home=$real_home, jhome=$jhome" >&2
     
     # First ensure the user exists
     create_user "$u"
@@ -214,12 +215,17 @@ jail_user() {
         # Ensure jail home directory exists
         mkdir -p "$jhome"
         
-        # Only mount if not already mounted - FIX: Check the jail home path
+        # FIXED: Explicitly check the jail home path, not the real home
+        echo "DEBUG: Checking if $jhome is already a mountpoint" >&2
         if ! mountpoint -q "$jhome"; then
             # This is the crucial mount - bind /home/<user> to /home/jail/<user>/home/<user>
+            echo "DEBUG: Executing bind mount: mount --bind $real_home $jhome" >&2
             mount --bind "$real_home" "$jhome"
-            echo "DEBUG: Mount executed: mount --bind $real_home $jhome" >&2
-            log INFO "Bound $real_home → $jhome (site content unchanged)"
+            if mountpoint -q "$jhome"; then
+                log INFO "Successfully bound $real_home → $jhome (site content unchanged)"
+            else
+                log ERROR "Failed to bind mount $real_home → $jhome"
+            fi
         else
             log INFO "$jhome already mounted"
         fi
@@ -260,7 +266,17 @@ jail_user() {
         echo "DEBUG: User entry in passwd: $(grep "^$u:" /etc/passwd)" >&2
         echo "DEBUG: User entry in jail passwd: $(grep "^$u:" "$user_jail/etc/passwd")" >&2
         
-        log SUCCESS "User '$u' jailed with site content preserved at /home/$u"
+        # CRITICAL: Check if jail shell is set correctly
+        local final_shell=$(grep "^$u:" /etc/passwd | cut -d: -f7)
+        echo "DEBUG: Final shell for $u: $final_shell" >&2
+        if [ "$final_shell" = "/usr/sbin/jk_chrootsh" ]; then
+            log SUCCESS "User '$u' jailed with site content preserved at /home/$u"
+        else
+            log WARNING "User shell may not be set correctly: $final_shell"
+            # Force set it one more time
+            sed -i "s|^$u:.*$|$prefix:/usr/sbin/jk_chrootsh|" /etc/passwd
+            echo "DEBUG: Re-attempted to set shell: $(grep "^$u:" /etc/passwd)" >&2
+        fi
     else
         log ERROR "Failed to jail '$u'"
         # If jailing failed, reset user shell
