@@ -107,11 +107,18 @@ install_dependencies() {
 }
 
 initialize_jail() {
+    echo "DEBUG: Entering initialize_jail" >&2
     if [ ! -d "$JAIL_ROOT" ]; then
         log INFO "Initializing global jail at $JAIL_ROOT"
         mkdir -p "$JAIL_ROOT"
         chown root:root "$JAIL_ROOT"; chmod 755 "$JAIL_ROOT"
-        jk_init -v "$JAIL_ROOT" basicshell netutils ssh sftp scp editors
+        echo "DEBUG: Set permissions on $JAIL_ROOT to 755" >&2
+        
+        if ! jk_init -v "$JAIL_ROOT" basicshell netutils ssh sftp scp editors; then
+            echo "DEBUG: jk_init failed for global jail" >&2
+            log WARNING "jk_init failed for global jail, creating manually"
+        fi
+        
         mkdir -p "$JAIL_ROOT/usr/sbin" "$JAIL_ROOT/etc"
         cp /usr/sbin/jk_lsh   "$JAIL_ROOT/usr/sbin/"; chmod 755 "$JAIL_ROOT/usr/sbin/jk_lsh"
         cp /usr/sbin/jk_chrootsh "$JAIL_ROOT/usr/sbin/"; chmod 755 "$JAIL_ROOT/usr/sbin/jk_chrootsh"
@@ -119,6 +126,7 @@ initialize_jail() {
         grep -E '^(root|nobody):' /etc/group  >"$JAIL_ROOT/etc/group"
         chown -R root:root "$JAIL_ROOT"; chmod -R 755 "$JAIL_ROOT"
     fi
+    echo "DEBUG: Exiting initialize_jail" >&2
 }
 
 get_site_users() {
@@ -145,13 +153,20 @@ unjail_user() {
 
 jail_user() {
     local u=$1 user_jail="$JAIL_ROOT/$u" real_home="/home/$u" jhome="$user_jail/home/$u"
+    echo "DEBUG: Jailing user $u" >&2
     create_user "$u"
     unjail_user "$u"
 
     # (Re)init per‑user jail
     mkdir -p "$user_jail"
     chown root:root "$user_jail"; chmod 755 "$user_jail"
-    jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors || log WARNING "jk_init failed for $u"
+    echo "DEBUG: Set permissions on $user_jail to 755" >&2
+    
+    if ! jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors; then
+        echo "DEBUG: jk_init failed for $u" >&2
+        log WARNING "jk_init failed for $u, creating manually"
+    fi
+    
     mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
     cp /usr/sbin/jk_lsh   "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
     cp /usr/sbin/jk_chrootsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_chrootsh"
@@ -197,13 +212,29 @@ show_summary() {
 # Main
 #################################
 main() {
+    echo "DEBUG: Starting main function" >&2
     check_root
+    echo "DEBUG: After check_root" >&2
+    
     validate_config
+    echo "DEBUG: After validate_config" >&2
+    
     install_dependencies
+    echo "DEBUG: After install_dependencies" >&2
+    
     initialize_jail
+    echo "DEBUG: After initialize_jail" >&2
+    
     show_summary
-    for u in $(get_site_users); do jail_user "$u"; done
+    echo "DEBUG: After show_summary" >&2
+    
+    for u in $(get_site_users); do 
+        jail_user "$u"
+        echo "DEBUG: After jailing user $u" >&2
+    done
+    
     log SUCCESS "All site users jailed."
+    echo "DEBUG: Script completed successfully" >&2
 }
 
 main "$@"
