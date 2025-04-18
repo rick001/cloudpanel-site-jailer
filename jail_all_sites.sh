@@ -214,10 +214,11 @@ jail_user() {
         # Ensure jail home directory exists
         mkdir -p "$jhome"
         
-        # Only mount if not already mounted
+        # Only mount if not already mounted - FIX: Check the jail home path
         if ! mountpoint -q "$jhome"; then
             # This is the crucial mount - bind /home/<user> to /home/jail/<user>/home/<user>
             mount --bind "$real_home" "$jhome"
+            echo "DEBUG: Mount executed: mount --bind $real_home $jhome" >&2
             log INFO "Bound $real_home → $jhome (site content unchanged)"
         else
             log INFO "$jhome already mounted"
@@ -255,6 +256,10 @@ jail_user() {
         # Ensure the home directory in passwd is correct for CloudPanel
         usermod -d "/home/$u" "$u" 2>/dev/null || sed -i "s|^\($u:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):.*$|\1:/home/$u|" /etc/passwd
         
+        # Verify user can access their home directory
+        echo "DEBUG: User entry in passwd: $(grep "^$u:" /etc/passwd)" >&2
+        echo "DEBUG: User entry in jail passwd: $(grep "^$u:" "$user_jail/etc/passwd")" >&2
+        
         log SUCCESS "User '$u' jailed with site content preserved at /home/$u"
     else
         log ERROR "Failed to jail '$u'"
@@ -274,7 +279,7 @@ show_summary() {
 
 # Function to fix a user's home directory and shell
 fix_user() {
-    local u=$1
+    local u=$1 user_jail="$JAIL_ROOT/$u" jhome="$user_jail/home/$u"
     echo "DEBUG: Fixing user $u" >&2
     
     # Reset shell to bash directly in passwd file
@@ -285,17 +290,22 @@ fix_user() {
     sed -i "s|^\($u:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):.*$|\1:/home/$u|" /etc/passwd
     echo "DEBUG: Reset home directory for $u" >&2
     
-    # Unmount any existing mounts
-    local jhome="$JAIL_ROOT/$u/home/$u"
+    # Unmount any existing mounts - VERIFY CORRECT PATH
     if mountpoint -q "$jhome" 2>/dev/null; then
+        echo "DEBUG: Unmounting $jhome..." >&2
         umount "$jhome"
         echo "DEBUG: Unmounted $jhome" >&2
+    else
+        echo "DEBUG: No mount at $jhome to unmount" >&2
     fi
     
-    # Remove fstab entry
+    # Remove fstab entry - VERIFY CORRECT PATH
     if grep -qs "^/home/$u[[:space:]]\+$jhome" /etc/fstab; then
         sed -i "\#^/home/$u[[:space:]]\+$jhome#d" /etc/fstab
-        echo "DEBUG: Removed fstab entry" >&2
+        systemctl daemon-reload
+        echo "DEBUG: Removed fstab entry and reloaded systemd" >&2
+    else
+        echo "DEBUG: No fstab entry found for $jhome" >&2
     fi
     
     # Ensure home directory exists and is accessible
@@ -304,7 +314,7 @@ fix_user() {
     chmod 755 "/home/$u"
     
     # Force the login directory to be properly set
-    grep "$u" /etc/passwd
+    echo "DEBUG: Final passwd entry for $u: $(grep "$u" /etc/passwd)" >&2
     
     log SUCCESS "Fixed user $u"
 }
