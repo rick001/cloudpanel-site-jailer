@@ -208,10 +208,53 @@ jail_user() {
     # Ensure all required directories exist
     mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
     mkdir -p "$user_jail/home" "$jail_home_dir"
+    mkdir -p "$user_jail/usr/bin" "$user_jail/dev" "$user_jail/tmp" "$user_jail/var/log"
+    
+    # Create essential devices
+    if [ ! -e "$user_jail/dev/null" ]; then
+        mknod -m 666 "$user_jail/dev/null" c 1 3
+    fi
+    if [ ! -e "$user_jail/dev/zero" ]; then
+        mknod -m 666 "$user_jail/dev/zero" c 1 5
+    fi
+    if [ ! -e "$user_jail/dev/random" ]; then
+        mknod -m 644 "$user_jail/dev/random" c 1 8
+    fi
+    if [ ! -e "$user_jail/dev/urandom" ]; then
+        mknod -m 644 "$user_jail/dev/urandom" c 1 9
+    fi
+    
+    # Set up tmp and var permissions
+    chmod 1777 "$user_jail/tmp"
+    chmod 755 "$user_jail/var/log"
     
     # Copy the necessary binaries
     cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
     cp /usr/sbin/jk_chrootsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_chrootsh"
+    
+    # Copy essential shell utilities
+    for cmd in bash sh ls mkdir cp rm mv chmod chown cat grep awk sed find; do
+        if [ -x "/bin/$cmd" ]; then
+            cp "/bin/$cmd" "$user_jail/bin/" && chmod 755 "$user_jail/bin/$cmd"
+        elif [ -x "/usr/bin/$cmd" ]; then
+            mkdir -p "$user_jail/usr/bin"
+            cp "/usr/bin/$cmd" "$user_jail/usr/bin/" && chmod 755 "$user_jail/usr/bin/$cmd"
+        fi
+    done
+    
+    # Copy required libraries
+    copy_required_libs "$user_jail" "/bin/bash"
+    copy_required_libs "$user_jail" "/usr/sbin/jk_chrootsh"
+    
+    # Setup basic profile and bashrc
+    if [ ! -f "$user_jail/etc/profile" ]; then
+        cat > "$user_jail/etc/profile" << 'EOF'
+# /etc/profile: system-wide .profile file for the Bourne shell
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export TERM=xterm
+EOF
+    fi
     
     # Set up passwd and group files
     grep -E '^(root|nobody):' /etc/passwd > "$user_jail/etc/passwd"
@@ -403,6 +446,37 @@ EOF
     fi
 }
 
+# Function to copy required libraries for a binary
+copy_required_libs() {
+    local jail_dir="$1"
+    local binary="$2"
+    
+    echo "DEBUG: Copying libraries for $binary to $jail_dir" >&2
+    
+    # Using ldd to find the libraries needed
+    ldd "$binary" | grep '=>' | awk '{print $3}' | while read -r lib; do
+        if [ -f "$lib" ]; then
+            # Get directory where lib should go
+            local libdir=$(dirname "$lib")
+            # Create directory in jail
+            mkdir -p "$jail_dir$libdir"
+            # Copy lib
+            cp -f "$lib" "$jail_dir$libdir/" || echo "WARNING: Failed to copy $lib" >&2
+            # Set permissions
+            chmod 755 "$jail_dir$lib"
+        fi
+    done
+    
+    # Also copy the interpreter if it exists
+    local interpreter=$(ldd "$binary" | grep 'ld-linux' | awk '{print $1}')
+    if [ -n "$interpreter" ] && [ -f "$interpreter" ]; then
+        local intdir=$(dirname "$interpreter")
+        mkdir -p "$jail_dir$intdir"
+        cp -f "$interpreter" "$jail_dir$intdir/" || echo "WARNING: Failed to copy $interpreter" >&2
+        chmod 755 "$jail_dir$interpreter"
+    fi
+}
+
 show_summary() {
     log INFO "Config: DB=$DB_PATH, JAIL_ROOT=$JAIL_ROOT"
     echo
@@ -556,6 +630,44 @@ diagnose_jail() {
         # Suggest AppArmor commands
         echo "   To temporarily disable AppArmor: sudo aa-teardown"
         echo "   To check enforcement status: sudo aa-status --enabled"
+    fi
+    
+    # Check for missing files/libraries
+    echo "11. Checking for critical files and libraries:"
+    
+    # Check for bash
+    if [ -x "$user_jail/bin/bash" ]; then
+        echo "   [OK] Bash exists in jail: $(ls -la $user_jail/bin/bash)"
+    else
+        echo "   [ERROR] Bash missing from jail"
+    fi
+    
+    # Check for essential libraries
+    echo "   Checking interpreter:"
+    local interpreter=$(ldd /bin/bash | grep 'ld-linux' | awk '{print $1}')
+    if [ -f "$user_jail$interpreter" ]; then
+        echo "   [OK] Interpreter exists: $user_jail$interpreter"
+    else
+        echo "   [ERROR] Interpreter missing: $interpreter"
+    fi
+    
+    # Check if basic commands work in the jail
+    echo "12. Testing basic command execution in jail:"
+    
+    # Create a test script in the jail
+    cat > "$user_jail/tmp/test.sh" << 'EOF'
+#!/bin/bash
+echo "Shell test successful"
+EOF
+    chmod 755 "$user_jail/tmp/test.sh"
+    
+    # Try running it with chroot
+    if chroot "$user_jail" /tmp/test.sh 2>/tmp/chroot_test.log; then
+        echo "   [OK] Basic chroot test passed"
+    else
+        echo "   [ERROR] Basic chroot test failed"
+        echo "   Error log:"
+        cat /tmp/chroot_test.log 2>/dev/null || echo "   (No error log available)"
     fi
     
     echo "=========================================================="
