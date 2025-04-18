@@ -170,11 +170,18 @@ create_user() {
 jail_user() {
     local u=$1
     create_user "$u"
+
     local user_jail="$JAIL_ROOT/$u"
     # init per-user jail
     if [ ! -d "$user_jail" ]; then
         log INFO "Setting up jail for '$u'…"
         mkdir -p "$user_jail"
+        
+        # Fix permissions on user jail directory
+        chown root:root "$user_jail"
+        chmod 755 "$user_jail"
+        echo "DEBUG: Set permissions on $user_jail to 755" >&2
+        
         jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors
         mkdir -p "$user_jail/usr/sbin" "$user_jail/etc"
         cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
