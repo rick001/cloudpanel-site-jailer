@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+set -x  # Enable debug mode for the entire script
 
 ##############################
 # CloudPanel Site Jailer
@@ -27,13 +28,20 @@ SKIP_CONFIRM=false
 # Logging with timestamp and color
 log() {
     local level=$1 message=$2 color=$NC
+    
+    # Add debug output
+    echo "DEBUG: log function called with level=$level message=$message" >&2
+    
     case $level in
         ERROR)   color=$RED ;;
         SUCCESS) color=$GREEN ;;
         WARNING) color=$YELLOW ;;
         INFO)    color=$BLUE ;;
     esac
-    echo -e "${color}[$(date +'%F %T')] $message${NC}" | tee -a "$LOGFILE"
+    
+    # Simplified logging to avoid potential issues
+    echo -e "${color}[$(date +'%F %T')] $message${NC}"
+    echo -e "${color}[$(date +'%F %T')] $message${NC}" >> "$LOGFILE"
 }
 
 # Display help text
@@ -95,15 +103,22 @@ done
 # Checks and setup
 #################################
 
+# Add debug echo at the beginning of each function
 check_root() {
+    echo "DEBUG: Inside check_root" >&2
     [ "$(id -u)" -ne 0 ] && { log ERROR "This script must be run as root"; exit 1; }
+    echo "DEBUG: Exiting check_root" >&2
 }
 
 validate_config() {
+    echo "DEBUG: Inside validate_config" >&2
     local db_dir
     db_dir="$(dirname "$DB_PATH")"
-    [ ! -d "$db_dir" ] && { log ERROR "CloudPanel directory not found: $db_dir"; exit 1; }
-    [ ! -f "$DB_PATH" ] && { log ERROR "CloudPanel DB not found at: $DB_PATH"; exit 1; }
+    echo "DEBUG: db_dir=$db_dir" >&2
+    
+    [ ! -d "$db_dir" ] && { echo "ERROR: CloudPanel directory not found: $db_dir" >&2; exit 1; }
+    [ ! -f "$DB_PATH" ] && { echo "ERROR: CloudPanel DB not found at: $DB_PATH" >&2; exit 1; }
+    echo "DEBUG: Exiting validate_config" >&2
 }
 
 install_dependencies() {
