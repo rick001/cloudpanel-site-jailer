@@ -129,7 +129,22 @@ install_dependencies() {
 initialize_jail() {
     if [ ! -d "$JAIL_ROOT" ]; then
         log "WARNING" "Initializing JailKit environment at $JAIL_ROOT"
+        mkdir -p "$JAIL_ROOT"
         jk_init -v "$JAIL_ROOT" basicshell netutils ssh sftp scp editors
+        
+        # Create necessary directories and copy shell
+        mkdir -p "$JAIL_ROOT/usr/sbin"
+        cp /usr/sbin/jk_lsh "$JAIL_ROOT/usr/sbin/"
+        chmod 755 "$JAIL_ROOT/usr/sbin/jk_lsh"
+        
+        # Create /etc directory and add passwd/group files
+        mkdir -p "$JAIL_ROOT/etc"
+        grep -E "^(root|nobody):" /etc/passwd > "$JAIL_ROOT/etc/passwd"
+        grep -E "^(root|nobody):" /etc/group > "$JAIL_ROOT/etc/group"
+        
+        # Set proper permissions
+        chown -R root:root "$JAIL_ROOT"
+        chmod 755 "$JAIL_ROOT"
     fi
 }
 
@@ -147,7 +162,7 @@ create_user() {
     
     if ! id "$user" &>/dev/null; then
         log "INFO" "Creating user $user..."
-        useradd -m -s /bin/bash "$user"
+        useradd -m -s /usr/sbin/jk_lsh "$user"
         if [ $? -eq 0 ]; then
             log "SUCCESS" "User $user created successfully"
             return 0
