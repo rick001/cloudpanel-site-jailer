@@ -50,9 +50,11 @@ Options:
   -v, --verbose        Enable verbose
   -y, --yes            Skip confirmation
   --fix                Fix users (restore original state)
+  --diagnose USER      Run diagnostics for a specific user
 
 Example:
   $0 --db-path /path/db.sq3 --jail-root /custom/jail
+  $0 --diagnose techbreeze
 EOF
     exit 0
 }
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose) VERBOSE=true; shift ;;
         -y|--yes)     SKIP_CONFIRM=true; shift ;;
         --fix)        FIX_MODE=true; shift ;;
+        --diagnose)   local u="$2"; if [ -z "$u" ]; then log ERROR "Must specify a user to diagnose"; exit 1; fi; diagnose_jail "$u"; exit 0 ;;
         *)            log ERROR "Unknown option $1"; show_help ;;
     esac
 done
@@ -355,6 +358,88 @@ fix_user() {
     log SUCCESS "Fixed user $u"
 }
 
+# Function to diagnose jail setup issues
+diagnose_jail() {
+    local u=$1
+    local user_jail="$JAIL_ROOT/$u"
+    local jail_home_dir="$user_jail/home/$u"
+    
+    echo "==================== JAIL DIAGNOSTICS ===================="
+    echo "Diagnosing jail for user: $u"
+    
+    # Check shell setting
+    local shell=$(grep "^$u:" /etc/passwd | cut -d: -f7)
+    echo "1. Shell in passwd: $shell"
+    [ "$shell" = "/usr/sbin/jk_chrootsh" ] && echo "   [OK] Shell is set to jk_chrootsh" || echo "   [ERROR] Shell is not set to jk_chrootsh"
+    
+    # Check if chrootsh exists and is executable
+    echo "2. Checking jk_chrootsh:"
+    if [ -x "/usr/sbin/jk_chrootsh" ]; then
+        echo "   [OK] /usr/sbin/jk_chrootsh exists and is executable"
+    else
+        echo "   [ERROR] /usr/sbin/jk_chrootsh missing or not executable: $(ls -la /usr/sbin/jk_chrootsh 2>&1)"
+    fi
+    
+    if [ -x "$user_jail/usr/sbin/jk_chrootsh" ]; then
+        echo "   [OK] $user_jail/usr/sbin/jk_chrootsh exists and is executable"
+    else
+        echo "   [ERROR] Jail jk_chrootsh missing or not executable: $(ls -la $user_jail/usr/sbin/jk_chrootsh 2>&1)"
+    fi
+    
+    # Check mount
+    echo "3. Checking mount:"
+    if mountpoint -q "$jail_home_dir"; then
+        echo "   [OK] $jail_home_dir is mounted"
+    else
+        echo "   [ERROR] $jail_home_dir is not mounted"
+    fi
+    
+    # Check permissions
+    echo "4. Checking permissions:"
+    echo "   User jail: $(ls -ld $user_jail)"
+    echo "   User home in jail: $(ls -ld $jail_home_dir)"
+    echo "   Real home: $(ls -ld /home/$u)"
+    
+    # Check jailkit config
+    echo "5. Checking jailkit config:"
+    if [ -f "/etc/jailkit/jk_chrootsh.conf" ]; then
+        echo "   [OK] jk_chrootsh.conf exists"
+        grep -v "^#" /etc/jailkit/jk_chrootsh.conf | grep -v "^$"
+    else
+        echo "   [WARNING] jk_chrootsh.conf not found"
+    fi
+    
+    # Check passwd entries
+    echo "6. Passwd entries:"
+    echo "   System passwd: $(grep "^$u:" /etc/passwd)"
+    echo "   Jail passwd: $(grep "^$u:" $user_jail/etc/passwd)"
+    
+    # Check for SELinux/AppArmor
+    echo "7. Security modules:"
+    if command -v getenforce >/dev/null 2>&1; then
+        echo "   SELinux: $(getenforce)"
+    else
+        echo "   SELinux: not installed"
+    fi
+    
+    if command -v aa-status >/dev/null 2>&1; then
+        echo "   AppArmor: $(aa-status --enabled && echo "enabled" || echo "disabled")"
+    else
+        echo "   AppArmor: not installed"
+    fi
+    
+    # Check auth.log for jail errors
+    echo "8. Recent auth log entries for $u:"
+    grep -a "$u\|chrootsh\|jailkit" /var/log/auth.log | tail -n 10
+    
+    echo "=========================================================="
+    echo "To test jail directly, try:"
+    echo "1. /usr/sbin/jk_chrootsh -j $user_jail -n $u"
+    echo "2. chroot $user_jail /bin/bash -l"
+    echo "3. Try fixing with ./jail_all_sites.sh --fix and then re-run"
+    echo "=========================================================="
+}
+
 #################################
 # Main
 #################################
@@ -362,6 +447,17 @@ main() {
     echo "DEBUG: Starting main function" >&2
     check_root
     echo "DEBUG: After check_root" >&2
+    
+    # Check for diagnose flag
+    if [ "$1" = "--diagnose" ]; then
+        local u="$2"
+        if [ -z "$u" ]; then
+            log ERROR "Must specify a user to diagnose"
+            exit 1
+        fi
+        diagnose_jail "$u"
+        exit 0
+    fi
     
     # Check if we should fix users
     if [ "${FIX_MODE:-false}" = "true" ]; then
