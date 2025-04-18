@@ -167,20 +167,52 @@ create_user() {
     fi
 }
 
+# Function to unjail a user
+unjail_user() {
+    local u=$1
+    log INFO "Unjailing user '$u'..."
+    
+    # Remove from fstab
+    local user_jail="$JAIL_ROOT/$u"
+    local jhome="$user_jail/home/$u"
+    if grep -qs "^/home/$u[[:space:]]\+$jhome" /etc/fstab; then
+        sed -i "\#^/home/$u[[:space:]]\+$jhome#d" /etc/fstab
+        log INFO " → removed fstab entry"
+    fi
+    
+    # Unmount if mounted
+    if mountpoint -q "$jhome"; then
+        umount "$jhome"
+        log INFO " → unmounted $jhome"
+    fi
+    
+    # Reset the user's shell to bash
+    usermod -s /bin/bash "$u"
+    
+    # Update passwd/shadow entries for the user
+    sed -i "/^$u:/d" "$user_jail/etc/passwd" 2>/dev/null
+    
+    log SUCCESS "User '$u' unjailed"
+}
+
+# Function to jail user
 jail_user() {
     local u=$1
     create_user "$u"
 
-    local user_jail="$JAIL_ROOT/$u"
-    
     # Check if jail needs to be initialized or re-initialized
     local needs_init=false
-    if [ ! -d "$user_jail" ]; then
+    if [ ! -d "$JAIL_ROOT/$u" ]; then
         needs_init=true
-    elif [ ! -f "$user_jail/etc/passwd" ] || [ ! -f "$user_jail/usr/sbin/jk_lsh" ]; then
+    elif [ ! -f "$JAIL_ROOT/$u/etc/passwd" ] || [ ! -f "$JAIL_ROOT/$u/usr/sbin/jk_lsh" ]; then
         log WARNING "Jail directory exists but is incomplete, reinitializing"
         needs_init=true
     fi
+    
+    # Unjail first to ensure clean state
+    unjail_user "$u"
+    
+    local user_jail="$JAIL_ROOT/$u"
     
     # Initialize or re-initialize the jail if needed
     if $needs_init; then
@@ -268,10 +300,14 @@ jail_user() {
         log INFO " → added $u to jail group"
     fi
 
+    # IMPORTANT: Set the user's shell to jk_chrootsh, not jk_lsh
+    usermod -s /usr/sbin/jk_chrootsh "$u"
+    log INFO " → changed shell to jk_chrootsh for $u"
+    
     # perform the jail
     if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh -n "$u"; then
         # Fix jail paths and permissions
-        sed -i "s#/\./home/#/home/#g" "$user_jail/etc/passwd"
+        sed -i "s#/\./home/#/home/#g" "$user_jail/etc/passwd" 2>/dev/null
         
         # Ensure jail directory is accessible
         chmod 755 "$user_jail"
@@ -281,12 +317,17 @@ jail_user() {
         log SUCCESS "User '$u' jailed (home via bind-mount)"
     else
         log ERROR "Failed to jail '$u'"
+        
+        # If jailing failed, reset user's shell
+        usermod -s /bin/bash "$u"
     fi
 }
 
+# Function to show summary before execution
 show_summary() {
     log INFO "Configuration: DB=$DB_PATH  JAIL_ROOT=$JAIL_ROOT  LOGFILE=$LOGFILE"
     echo
+
     local users; users=$(get_site_users)
     if [ -z "$users" ]; then
         log WARNING "No users found in DB."
@@ -294,6 +335,10 @@ show_summary() {
         log INFO "Users to jail:"
         for u in $users; do log INFO " - $u"; done
     fi
+    
+    log WARNING "NOTE: All web services will continue to work normally."
+    log WARNING "Only SSH/SFTP access will be jailed."
+    
     if ! $SKIP_CONFIRM && [ -n "$users" ]; then
         read -rp "Proceed? (y/N) " ans; echo
         [[ $ans =~ ^[Yy]$ ]] || { log INFO "Aborted."; exit 0; }
