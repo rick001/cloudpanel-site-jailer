@@ -242,6 +242,12 @@ jail_user() {
             mount --bind "$real_home" "$jhome"
             log INFO " → bound $real_home → $jhome"
         fi
+        
+        # Ensure the user can access their home directory
+        chmod 755 "$user_jail/home"
+        chown "$u:$u" "$jhome"
+        log INFO " → fixed permissions on $jhome"
+        
         # persist in fstab
         if ! grep -qs "^$real_home[[:space:]]\+$jhome" /etc/fstab; then
             echo "$real_home $jhome none bind 0 0" >> /etc/fstab
@@ -264,6 +270,14 @@ jail_user() {
 
     # perform the jail
     if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh -n "$u"; then
+        # Fix jail paths and permissions
+        sed -i "s#/\./home/#/home/#g" "$user_jail/etc/passwd"
+        
+        # Ensure jail directory is accessible
+        chmod 755 "$user_jail"
+        chmod 755 "$user_jail/home"
+        chmod 755 "$user_jail/home/$u"
+        
         log SUCCESS "User '$u' jailed (home via bind-mount)"
     else
         log ERROR "Failed to jail '$u'"
