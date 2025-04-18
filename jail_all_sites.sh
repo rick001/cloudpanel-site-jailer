@@ -172,9 +172,21 @@ jail_user() {
     create_user "$u"
 
     local user_jail="$JAIL_ROOT/$u"
-    # init per-user jail
+    
+    # Check if jail needs to be initialized or re-initialized
+    local needs_init=false
     if [ ! -d "$user_jail" ]; then
+        needs_init=true
+    elif [ ! -f "$user_jail/etc/passwd" ] || [ ! -f "$user_jail/usr/sbin/jk_lsh" ]; then
+        log WARNING "Jail directory exists but is incomplete, reinitializing"
+        needs_init=true
+    fi
+    
+    # Initialize or re-initialize the jail if needed
+    if $needs_init; then
         log INFO "Setting up jail for '$u'…"
+        
+        # Ensure the jail directory exists
         mkdir -p "$user_jail"
         
         # Fix permissions on user jail directory
@@ -182,12 +194,42 @@ jail_user() {
         chmod 755 "$user_jail"
         echo "DEBUG: Set permissions on $user_jail to 755" >&2
         
-        jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors
-        mkdir -p "$user_jail/usr/sbin" "$user_jail/etc"
-        cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
+        # Try to initialize the jail with jk_init
+        if ! jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors; then
+            log WARNING "jk_init failed, creating minimal jail structure manually"
+        fi
+        
+        # Ensure essential directories exist regardless of jk_init success
+        mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
+        
+        # Copy jk_lsh
+        if [ -f /usr/sbin/jk_lsh ]; then
+            cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"
+            chmod 755 "$user_jail/usr/sbin/jk_lsh"
+        else
+            log ERROR "Could not find jk_lsh at /usr/sbin/jk_lsh"
+            return 1
+        fi
+        
+        # Create basic passwd and group files
+        touch "$user_jail/etc/passwd" "$user_jail/etc/group"
         grep -E '^(root|nobody):' /etc/passwd >"$user_jail/etc/passwd"
         grep -E '^(root|nobody):' /etc/group  >"$user_jail/etc/group"
-        chown -R root:root "$user_jail"; chmod 755 "$user_jail"
+        
+        chown -R root:root "$user_jail"
+        chmod 755 "$user_jail"
+    fi
+
+    # Always ensure /etc directory and passwd/group files exist
+    mkdir -p "$user_jail/etc"
+    if [ ! -f "$user_jail/etc/passwd" ]; then
+        touch "$user_jail/etc/passwd"
+        grep -E '^(root|nobody):' /etc/passwd >"$user_jail/etc/passwd"
+    fi
+    
+    if [ ! -f "$user_jail/etc/group" ]; then
+        touch "$user_jail/etc/group"
+        grep -E '^(root|nobody):' /etc/group >"$user_jail/etc/group"
     fi
 
     # bind-mount real home
@@ -210,12 +252,13 @@ jail_user() {
     fi
 
     # ensure passwd/group entries
-    if ! grep -q "^$u:" "$user_jail/etc/passwd"; then
+    if ! grep -q "^$u:" "$user_jail/etc/passwd" 2>/dev/null; then
         grep "^$u:" /etc/passwd >>"$user_jail/etc/passwd"
         log INFO " → added $u to jail passwd"
     fi
-    if ! grep -q "^$u:" "$user_jail/etc/group"; then
-        grep "^$u:" /etc/group  >>"$user_jail/etc/group"
+    
+    if ! grep -q "^$u:" "$user_jail/etc/group" 2>/dev/null; then
+        grep "^$u:" /etc/group >>"$user_jail/etc/group"
         log INFO " → added $u to jail group"
     fi
 
@@ -223,7 +266,7 @@ jail_user() {
     if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh -n "$u"; then
         log SUCCESS "User '$u' jailed (home via bind-mount)"
     else
-        log ERROR   "Failed to jail '$u'"
+        log ERROR "Failed to jail '$u'"
     fi
 }
 
