@@ -210,8 +210,8 @@ jail_user() {
         chmod 755 "$user_jail"
     fi
     
-    # Jail the user without moving their home directory
-    if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh "$user"; then
+    # Jail the user with their original home directory
+    if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_lsh -m "/home/$user:/home/$user" "$user"; then
         log "SUCCESS" "User $user jailed successfully"
     else
         log "ERROR" "Failed to jail user $user"
