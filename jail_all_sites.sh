@@ -217,12 +217,25 @@ show_summary() {
 # Main
 #################################
 main() {
+    echo "DEBUG: Starting main function" >&2
     check_root
+    echo "DEBUG: After check_root" >&2
+    
     validate_config
+    echo "DEBUG: After validate_config" >&2
+    
     install_dependencies
+    echo "DEBUG: After install_dependencies" >&2
+    
     initialize_jail
+    echo "DEBUG: After initialize_jail" >&2
+    
     show_summary
+    echo "DEBUG: After show_summary" >&2
+    
     for u in $(get_site_users); do jail_user "$u"; done
+    echo "DEBUG: After jailing users" >&2
+    
     log SUCCESS "Done: all site users jailed without moving their home dirs."
 }
 
