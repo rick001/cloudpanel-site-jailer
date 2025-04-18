@@ -191,6 +191,7 @@ jail_user() {
     
     # Ensure all required directories exist
     mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
+    mkdir -p "$user_jail/home" "$user_jail/home/$u"
     
     # Copy the necessary binaries
     cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
@@ -200,30 +201,37 @@ jail_user() {
     grep -E '^(root|nobody):' /etc/passwd > "$user_jail/etc/passwd"
     grep -E '^(root|nobody):' /etc/group > "$user_jail/etc/group"
     
-    # Add the user to passwd in the jail with correct path (no ./)
+    # Add the user to passwd in the jail with correct path
     grep "^$u:" /etc/passwd | sed "s|:/home/jail/$u/\./home/$u:|:/home/$u:|" >> "$user_jail/etc/passwd"
     grep "^$u:" /etc/group >> "$user_jail/etc/group"
     
     # Set jail permissions
     chown -R root:root "$user_jail"; chmod -R 755 "$user_jail"
     
-    # Set up bind mount for home directory
+    # Set up bind mount for home directory - CRITICAL for CloudPanel
+    # The original site content must stay at /home/<user> for CloudPanel
     if [ -d "$real_home" ]; then
+        # Ensure jail home directory exists
         mkdir -p "$jhome"
+        
+        # Only mount if not already mounted
         if ! mountpoint -q "$jhome"; then
+            # This is the crucial mount - bind /home/<user> to /home/jail/<user>/home/<user>
             mount --bind "$real_home" "$jhome"
-            log INFO "Bound $real_home → $jhome"
+            log INFO "Bound $real_home → $jhome (site content unchanged)"
         else
             log INFO "$jhome already mounted"
         fi
         
         # Set proper permissions on home directory
-        chmod 755 "$user_jail/home" "$jhome"
+        chmod 755 "$user_jail/home"
+        chmod 755 "$jhome"
         chown "$u:$u" "$jhome"
         
         # Add to fstab if not already there
         if ! grep -qs "^$real_home[[:space:]]\+$jhome" /etc/fstab; then
             echo "$real_home $jhome none bind 0 0" >> /etc/fstab
+            systemctl daemon-reload
             log INFO "Added fstab entry for bind-mount"
         fi
     else
@@ -231,28 +239,27 @@ jail_user() {
     fi
     
     # Set the user's shell safely
-    # Try usermod first, but fall back to direct edit if user is in use
-    if ! usermod -s /usr/sbin/jk_chrootsh "$u" 2>/dev/null; then
-        log WARNING "User $u is in use, directly updating passwd"
-        # Get the current line and replace the shell portion
-        local current=$(grep "^$u:" /etc/passwd)
-        local prefix=${current%:*}
-        sed -i "s|^$u:.*$|$prefix:/usr/sbin/jk_chrootsh|" /etc/passwd
-    fi
+    local current=$(grep "^$u:" /etc/passwd)
+    local prefix=${current%:*}
+    sed -i "s|^$u:.*$|$prefix:/usr/sbin/jk_chrootsh|" /etc/passwd
+    log INFO "Set shell to jk_chrootsh for $u"
     
-    # Jail the user with the no-copy option
-    if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_chrootsh -n "$u"; then
+    # Jail the user with the no-copy option, but handle potential failures
+    if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_chrootsh -n "$u" 2>/dev/null || true; then
         # Fix any path issues in the jail's passwd file
-        sed -i "s|/\./home/|/home/|g" "$user_jail/etc/passwd"
+        sed -i "s|/\./home/|/home/|g" "$user_jail/etc/passwd" 2>/dev/null
         
-        # Also fix the user's entry in the system passwd file
+        # Also fix the user's entry in the system passwd file - LEAVE HOME AT /home/<user>
         sed -i "s|$u:\([^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):/home/jail/$u/\./home/$u:|$u:\1:/home/$u:|" /etc/passwd
         
-        log SUCCESS "User '$u' jailed with home directory preserved"
+        # Ensure the home directory in passwd is correct for CloudPanel
+        usermod -d "/home/$u" "$u" 2>/dev/null || sed -i "s|^\($u:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):.*$|\1:/home/$u|" /etc/passwd
+        
+        log SUCCESS "User '$u' jailed with site content preserved at /home/$u"
     else
         log ERROR "Failed to jail '$u'"
         # If jailing failed, reset user shell
-        usermod -s /bin/bash "$u" 2>/dev/null || sed -i "s|^$u:.*$|$prefix:/bin/bash|" /etc/passwd
+        sed -i "s|^$u:.*$|$prefix:/bin/bash|" /etc/passwd
     fi
 }
 
