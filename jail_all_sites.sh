@@ -135,23 +135,49 @@ initialize_jail() {
 
 # Function to get site users
 get_site_users() {
-    local users
-    mapfile -t users < <(sqlite3 "$DB_PATH" \
-        "SELECT DISTINCT user FROM site WHERE user IS NOT NULL AND user != '';")
-    echo "${users[@]}"
+    sqlite3 "$DB_PATH" "SELECT DISTINCT user FROM site WHERE user IS NOT NULL AND user != '';" | tr '\n' ' '
+}
+
+# Function to create user if it doesn't exist
+create_user() {
+    local user=$1
+    if [ -z "$user" ]; then
+        return
+    fi
+    
+    if ! id "$user" &>/dev/null; then
+        log "INFO" "Creating user $user..."
+        useradd -m -s /bin/bash "$user"
+        if [ $? -eq 0 ]; then
+            log "SUCCESS" "User $user created successfully"
+            return 0
+        else
+            log "ERROR" "Failed to create user $user"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # Function to jail user
 jail_user() {
     local user=$1
-    if id "$user" &> /dev/null; then
-        if jk_jailuser -v -j "$JAIL_ROOT" "$user"; then
-            log "SUCCESS" "User $user jailed successfully"
-        else
-            log "ERROR" "Failed to jail user $user"
+    if [ -z "$user" ]; then
+        return
+    fi
+    
+    if ! id "$user" &>/dev/null; then
+        log "INFO" "User $user does not exist, attempting to create..."
+        if ! create_user "$user"; then
+            log "ERROR" "Cannot jail user $user - creation failed"
+            return
         fi
+    fi
+    
+    if jk_jailuser -v -j "$JAIL_ROOT" "$user"; then
+        log "SUCCESS" "User $user jailed successfully"
     else
-        log "WARNING" "User $user does not exist on this system, skipping"
+        log "ERROR" "Failed to jail user $user"
     fi
 }
 
@@ -163,13 +189,13 @@ show_summary() {
     log "INFO" "  Log File: $LOGFILE"
     
     local site_users
-    mapfile -t site_users < <(get_site_users)
+    site_users=$(get_site_users)
     
-    if [ ${#site_users[@]} -eq 0 ]; then
-        log "WARNING" "No site users found in database"
+    if [ -z "$site_users" ]; then
+        log "WARNING" "No site users found in DB – nothing to jail"
     else
         log "INFO" "Users to be jailed:"
-        for user in "${site_users[@]}"; do
+        for user in $site_users; do
             log "INFO" "  - $user"
         done
     fi
@@ -193,16 +219,16 @@ main() {
     initialize_jail
     show_summary
     
-    local site_users
-    mapfile -t site_users < <(get_site_users)
+    local users
+    users=$(get_site_users)
     
-    if [ ${#site_users[@]} -eq 0 ]; then
+    if [ -z "$users" ]; then
         log "WARNING" "No site users found in DB – nothing to jail"
         exit 0
     fi
     
-    for site_user in "${site_users[@]}"; do
-        jail_user "$site_user"
+    for user in $users; do
+        jail_user "$user"
     done
     
     log "SUCCESS" "Site-jailing process completed"
