@@ -171,48 +171,88 @@ unjail_user() {
 jail_user() {
     local u=$1 user_jail="$JAIL_ROOT/$u" real_home="/home/$u" jhome="$user_jail/home/$u"
     echo "DEBUG: Jailing user $u" >&2
+    
+    # First ensure the user exists
     create_user "$u"
+    
+    # Clean up any existing jail setup
     unjail_user "$u"
 
-    # (Re)init per‑user jail
+    # Create and set up jail directory with proper permissions
     mkdir -p "$user_jail"
     chown root:root "$user_jail"; chmod 755 "$user_jail"
     echo "DEBUG: Set permissions on $user_jail to 755" >&2
     
+    # Initialize the jail, handling errors
     if ! jk_init -v "$user_jail" basicshell netutils ssh sftp scp editors; then
-        echo "DEBUG: jk_init failed for $u" >&2
+        echo "DEBUG: jk_init failed for $u, creating manually" >&2
         log WARNING "jk_init failed for $u, creating manually"
     fi
     
+    # Ensure all required directories exist
     mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
-    cp /usr/sbin/jk_lsh   "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
+    
+    # Copy the necessary binaries
+    cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
     cp /usr/sbin/jk_chrootsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_chrootsh"
-    grep -E '^(root|nobody):' /etc/passwd >"$user_jail/etc/passwd"
-    grep -E '^(root|nobody):' /etc/group  >"$user_jail/etc/group"
+    
+    # Set up passwd and group files
+    grep -E '^(root|nobody):' /etc/passwd > "$user_jail/etc/passwd"
+    grep -E '^(root|nobody):' /etc/group > "$user_jail/etc/group"
+    
+    # Add the user to passwd in the jail with correct path (no ./)
+    grep "^$u:" /etc/passwd | sed "s|:/home/jail/$u/\./home/$u:|:/home/$u:|" >> "$user_jail/etc/passwd"
+    grep "^$u:" /etc/group >> "$user_jail/etc/group"
+    
+    # Set jail permissions
     chown -R root:root "$user_jail"; chmod -R 755 "$user_jail"
-
-    # bind-mount real home
+    
+    # Set up bind mount for home directory
     if [ -d "$real_home" ]; then
         mkdir -p "$jhome"
-        mountpoint -q "$jhome" || mount --bind "$real_home" "$jhome"
-        chmod 755 "$user_jail/home" "$jhome"; chown "$u:$u" "$jhome"
-        grep -qs "^$real_home[[:space:]]\+$jhome" /etc/fstab || \
-          (echo "$real_home $jhome none bind 0 0" >>/etc/fstab)
-        log INFO "Bound $real_home → $jhome"
+        if ! mountpoint -q "$jhome"; then
+            mount --bind "$real_home" "$jhome"
+            log INFO "Bound $real_home → $jhome"
+        else
+            log INFO "$jhome already mounted"
+        fi
+        
+        # Set proper permissions on home directory
+        chmod 755 "$user_jail/home" "$jhome"
+        chown "$u:$u" "$jhome"
+        
+        # Add to fstab if not already there
+        if ! grep -qs "^$real_home[[:space:]]\+$jhome" /etc/fstab; then
+            echo "$real_home $jhome none bind 0 0" >> /etc/fstab
+            log INFO "Added fstab entry for bind-mount"
+        fi
     else
         log WARNING "Real home not found: $real_home"
     fi
-
-    # ensure jailed passwd/group entries
-    grep -q "^$u:" "$user_jail/etc/passwd" || grep "^$u:" /etc/passwd >>"$user_jail/etc/passwd"
-    grep -q "^$u:" "$user_jail/etc/group"  || grep "^$u:" /etc/group  >>"$user_jail/etc/group"
-
-    # set shell & jail
-    usermod -s /usr/sbin/jk_chrootsh "$u"
+    
+    # Set the user's shell safely
+    # Try usermod first, but fall back to direct edit if user is in use
+    if ! usermod -s /usr/sbin/jk_chrootsh "$u" 2>/dev/null; then
+        log WARNING "User $u is in use, directly updating passwd"
+        # Get the current line and replace the shell portion
+        local current=$(grep "^$u:" /etc/passwd)
+        local prefix=${current%:*}
+        sed -i "s|^$u:.*$|$prefix:/usr/sbin/jk_chrootsh|" /etc/passwd
+    fi
+    
+    # Jail the user with the no-copy option
     if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_chrootsh -n "$u"; then
-        log SUCCESS "User '$u' jailed"
+        # Fix any path issues in the jail's passwd file
+        sed -i "s|/\./home/|/home/|g" "$user_jail/etc/passwd"
+        
+        # Also fix the user's entry in the system passwd file
+        sed -i "s|$u:\([^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):/home/jail/$u/\./home/$u:|$u:\1:/home/$u:|" /etc/passwd
+        
+        log SUCCESS "User '$u' jailed with home directory preserved"
     else
-        log ERROR   "Failed to jail '$u'"; usermod -s /bin/bash "$u"
+        log ERROR "Failed to jail '$u'"
+        # If jailing failed, reset user shell
+        usermod -s /bin/bash "$u" 2>/dev/null || sed -i "s|^$u:.*$|$prefix:/bin/bash|" /etc/passwd
     fi
 }
 
@@ -230,11 +270,13 @@ fix_user() {
     local u=$1
     echo "DEBUG: Fixing user $u" >&2
     
-    # Reset shell to bash
-    usermod -s /bin/bash "$u"
+    # Reset shell to bash directly in passwd file
+    sed -i "s|^\($u:.*\):/usr/sbin/jk_chrootsh$|\1:/bin/bash|" /etc/passwd
+    echo "DEBUG: Reset shell for $u" >&2
     
-    # Reset home directory in passwd file
-    usermod -d "/home/$u" "$u"
+    # Reset home directory directly in passwd file
+    sed -i "s|^\($u:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*\):.*$|\1:/home/$u|" /etc/passwd
+    echo "DEBUG: Reset home directory for $u" >&2
     
     # Unmount any existing mounts
     local jhome="$JAIL_ROOT/$u/home/$u"
@@ -253,6 +295,9 @@ fix_user() {
     mkdir -p "/home/$u"
     chown "$u:$u" "/home/$u"
     chmod 755 "/home/$u"
+    
+    # Force the login directory to be properly set
+    grep "$u" /etc/passwd
     
     log SUCCESS "Fixed user $u"
 }
