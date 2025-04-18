@@ -222,6 +222,38 @@ show_summary() {
     $SKIP_CONFIRM || { read -rp "Proceed? (y/N) " a; [[ $a =~ ^[Yy]$ ]] || { log INFO "Aborted"; exit 0; }; }
 }
 
+# Function to fix a user's home directory and shell
+fix_user() {
+    local u=$1
+    echo "DEBUG: Fixing user $u" >&2
+    
+    # Reset shell to bash
+    usermod -s /bin/bash "$u"
+    
+    # Reset home directory in passwd file
+    usermod -d "/home/$u" "$u"
+    
+    # Unmount any existing mounts
+    local jhome="$JAIL_ROOT/$u/home/$u"
+    if mountpoint -q "$jhome" 2>/dev/null; then
+        umount "$jhome"
+        echo "DEBUG: Unmounted $jhome" >&2
+    fi
+    
+    # Remove fstab entry
+    if grep -qs "^/home/$u[[:space:]]\+$jhome" /etc/fstab; then
+        sed -i "\#^/home/$u[[:space:]]\+$jhome#d" /etc/fstab
+        echo "DEBUG: Removed fstab entry" >&2
+    fi
+    
+    # Ensure home directory exists and is accessible
+    mkdir -p "/home/$u"
+    chown "$u:$u" "/home/$u"
+    chmod 755 "/home/$u"
+    
+    log SUCCESS "Fixed user $u"
+}
+
 #################################
 # Main
 #################################
@@ -229,6 +261,15 @@ main() {
     echo "DEBUG: Starting main function" >&2
     check_root
     echo "DEBUG: After check_root" >&2
+    
+    # Add option to fix users
+    if [ "$1" = "--fix" ]; then
+        for u in $(get_site_users); do
+            fix_user "$u"
+        done
+        log SUCCESS "All users fixed."
+        exit 0
+    fi
     
     validate_config
     echo "DEBUG: After validate_config" >&2
