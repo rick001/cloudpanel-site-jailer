@@ -217,12 +217,15 @@ jail_user() {
     grep -E '^(root|nobody):' /etc/passwd > "$user_jail/etc/passwd"
     grep -E '^(root|nobody):' /etc/group > "$user_jail/etc/group"
     
-    # Add the user to passwd in the jail with correct path
-    grep "^$u:" /etc/passwd | sed "s|:/home/jail/$u/\./home/$u:|:/home/$u:|" >> "$user_jail/etc/passwd"
+    # Add the user to passwd in the jail with correct path AND SHELL
+    grep "^$u:" /etc/passwd | sed "s|:/home/jail/$u/\./home/$u:|:/home/$u:|" | sed "s|:/usr/sbin/jk_chrootsh$|:/bin/bash|" >> "$user_jail/etc/passwd"
     grep "^$u:" /etc/group >> "$user_jail/etc/group"
     
     # Set jail permissions
     chown -R root:root "$user_jail"; chmod -R 755 "$user_jail"
+    
+    # Create jailkit config if missing
+    create_jailkit_config
     
     # -----------------------------------------------------------------------
     # CRITICAL MOUNT SECTION - Set up bind mount for home directory
@@ -306,6 +309,97 @@ jail_user() {
         log ERROR "Failed to jail '$u'"
         # If jailing failed, reset user shell
         sed -i "s|^$u:.*$|$prefix:/bin/bash|" /etc/passwd
+    fi
+}
+
+# Function to create necessary jailkit config files if missing
+create_jailkit_config() {
+    # Create jk_chrootsh.conf if it doesn't exist
+    if [ ! -f "/etc/jailkit/jk_chrootsh.conf" ]; then
+        echo "DEBUG: Creating missing jk_chrootsh.conf" >&2
+        mkdir -p /etc/jailkit
+        cat > /etc/jailkit/jk_chrootsh.conf << 'EOF'
+# This file configures the behavior of jk_chrootsh
+# Documentation: man jk_chrootsh
+
+# Paths where a non-root user can have a home directory
+homes = /home
+EOF
+        chmod 644 /etc/jailkit/jk_chrootsh.conf
+        log INFO "Created missing jk_chrootsh.conf"
+    fi
+    
+    # Create or update jk_check.conf
+    if [ ! -f "/etc/jailkit/jk_check.conf" ]; then
+        echo "DEBUG: Creating missing jk_check.conf" >&2
+        mkdir -p /etc/jailkit
+        cat > /etc/jailkit/jk_check.conf << 'EOF'
+# This file configures the behavior of jk_check
+# Documentation: man jk_check
+
+[DEFAULT]
+ignorepatheverywhere = /etc/jailkit
+ignorepackageerrors = busybox
+
+[/home/jail]
+comment = Default jail
+EOF
+        chmod 644 /etc/jailkit/jk_check.conf
+        log INFO "Created missing jk_check.conf"
+    fi
+    
+    # Create or update jk_init.ini
+    if [ ! -f "/etc/jailkit/jk_init.ini" ]; then
+        echo "DEBUG: Creating missing jk_init.ini" >&2
+        mkdir -p /etc/jailkit
+        cat > /etc/jailkit/jk_init.ini << 'EOF'
+# This file defines which files should be copied for a specific section
+# Documentation: man jk_init
+
+[basicshell]
+comment = basic shell functionality
+paths = /bin/sh, /bin/bash, /bin/dash, /bin/ls
+includesections = netutils, editors, ssh
+
+[netutils]
+comment = network utilities
+paths = /bin/ping, /usr/bin/wget
+
+[editors]
+comment = standard editors
+paths = /usr/bin/vim, /bin/vi, /usr/bin/nano
+
+[ssh]
+comment = ssh client functionality
+paths = /usr/bin/ssh, /usr/bin/scp
+
+[sftp]
+comment = sftp functionality
+paths = /usr/lib/sftp-server, /usr/libexec/sftp-server
+includesections = netbasics
+
+[scp]
+comment = scp functionality
+paths = /usr/bin/scp
+includesections = netbasics, ssh
+EOF
+        chmod 644 /etc/jailkit/jk_init.ini
+        log INFO "Created missing jk_init.ini"
+    fi
+    
+    # Create jk_lsh.conf if missing
+    if [ ! -f "/etc/jailkit/jk_lsh.conf" ]; then
+        echo "DEBUG: Creating missing jk_lsh.conf" >&2
+        mkdir -p /etc/jailkit
+        cat > /etc/jailkit/jk_lsh.conf << 'EOF'
+# This file configures the limited shell jk_lsh
+# Documentation: man jk_lsh
+
+[DEFAULT]
+allowed_shells = /usr/sbin/jk_lsh, /usr/sbin/jk_chrootsh
+EOF
+        chmod 644 /etc/jailkit/jk_lsh.conf
+        log INFO "Created missing jk_lsh.conf"
     fi
 }
 
@@ -437,6 +531,32 @@ diagnose_jail() {
     # Check auth.log for jail errors
     echo "8. Recent auth log entries for $u:"
     grep -a "$u\|chrootsh\|jailkit" /var/log/auth.log | tail -n 10
+    
+    # ADDITIONAL: Try to run the jail shell directly as test
+    echo "9. Testing jk_chrootsh directly:"
+    if /usr/sbin/jk_chrootsh -j "$user_jail" -n "$u" -m "/home/$u" -s echo "Jail test successful" 2>/tmp/jail_test.log; then
+        echo "   [OK] Direct jail shell execution worked"
+        cat /tmp/jail_test.log 2>/dev/null || echo "   (No output from test)"
+    else
+        echo "   [ERROR] Direct jail shell execution failed"
+        echo "   Error log:"
+        cat /tmp/jail_test.log 2>/dev/null || echo "   (No error log available)"
+    fi
+    
+    # Check AppArmor profiles that might block jailkit
+    echo "10. Checking AppArmor profiles affecting jails:"
+    if command -v aa-status >/dev/null 2>&1; then
+        if aa-status | grep -q chrootsh; then
+            echo "   [WARNING] AppArmor has profiles for chrootsh"
+            aa-status | grep chrootsh
+        else
+            echo "   No specific AppArmor profiles for jailkit found"
+        fi
+        
+        # Suggest AppArmor commands
+        echo "   To temporarily disable AppArmor: sudo aa-teardown"
+        echo "   To check enforcement status: sudo aa-status --enabled"
+    fi
     
     echo "=========================================================="
     echo "To test jail directly, try:"
