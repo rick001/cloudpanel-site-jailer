@@ -169,9 +169,15 @@ unjail_user() {
 }
 
 jail_user() {
-    local u=$1 user_jail="$JAIL_ROOT/$u" real_home="/home/$u" jhome="$user_jail/home/$u"
+    local u=$1
+    local user_jail="$JAIL_ROOT/$u"
+    local real_home="/home/$u" 
+    local jail_home_dir="$user_jail/home/$u"
+    
     echo "DEBUG: Jailing user $u" >&2
-    echo "DEBUG: user_jail=$user_jail, real_home=$real_home, jhome=$jhome" >&2
+    echo "DEBUG: real_home=$real_home" >&2
+    echo "DEBUG: user_jail=$user_jail" >&2
+    echo "DEBUG: jail_home_dir=$jail_home_dir" >&2
     
     # First ensure the user exists
     create_user "$u"
@@ -192,7 +198,7 @@ jail_user() {
     
     # Ensure all required directories exist
     mkdir -p "$user_jail/usr/sbin" "$user_jail/etc" "$user_jail/bin" "$user_jail/lib" "$user_jail/lib64"
-    mkdir -p "$user_jail/home" "$user_jail/home/$u"
+    mkdir -p "$user_jail/home" "$jail_home_dir"
     
     # Copy the necessary binaries
     cp /usr/sbin/jk_lsh "$user_jail/usr/sbin/"; chmod 755 "$user_jail/usr/sbin/jk_lsh"
@@ -209,42 +215,50 @@ jail_user() {
     # Set jail permissions
     chown -R root:root "$user_jail"; chmod -R 755 "$user_jail"
     
-    # Set up bind mount for home directory - CRITICAL for CloudPanel
+    # -----------------------------------------------------------------------
+    # CRITICAL MOUNT SECTION - Set up bind mount for home directory
     # The original site content must stay at /home/<user> for CloudPanel
-    if [ -d "$real_home" ]; then
-        # Ensure jail home directory exists
-        mkdir -p "$jhome"
-        
-        # FIXED: Explicitly check the jail home path, not the real home
-        echo "DEBUG: Checking if $jhome is already a mountpoint" >&2
-        if ! mountpoint -q "$jhome"; then
-            # This is the crucial mount - bind /home/<user> to /home/jail/<user>/home/<user>
-            echo "DEBUG: Executing bind mount: mount --bind $real_home $jhome" >&2
-            mount --bind "$real_home" "$jhome"
-            if mountpoint -q "$jhome"; then
-                log INFO "Successfully bound $real_home → $jhome (site content unchanged)"
-            else
-                log ERROR "Failed to bind mount $real_home → $jhome"
-            fi
-        else
-            log INFO "$jhome already mounted"
-        fi
-        
-        # Set proper permissions on home directory
-        chmod 755 "$user_jail/home"
-        chmod 755 "$jhome"
-        chown "$u:$u" "$jhome"
-        
-        # Add to fstab if not already there
-        if ! grep -qs "^$real_home[[:space:]]\+$jhome" /etc/fstab; then
-            echo "$real_home $jhome none bind 0 0" >> /etc/fstab
-            systemctl daemon-reload
-            log INFO "Added fstab entry for bind-mount"
-        fi
-    else
-        log WARNING "Real home not found: $real_home"
+    # -----------------------------------------------------------------------
+    
+    # Ensure real home dir exists
+    echo "DEBUG: Creating real home directory $real_home if needed" >&2
+    mkdir -p "$real_home"
+    chown "$u:$u" "$real_home"
+    chmod 755 "$real_home"
+    
+    # Check if jail home is already a mountpoint
+    echo "DEBUG: Checking if jail home dir $jail_home_dir is a mountpoint" >&2
+    if mountpoint -q "$jail_home_dir"; then
+        echo "DEBUG: $jail_home_dir is already a mountpoint, unmounting first" >&2
+        umount "$jail_home_dir"
     fi
     
+    # Mount the real home to the jail home
+    echo "DEBUG: Mounting $real_home → $jail_home_dir" >&2
+    mount --bind "$real_home" "$jail_home_dir"
+    
+    # Verify mount was successful
+    if mountpoint -q "$jail_home_dir"; then
+        echo "DEBUG: Mount successful!" >&2
+        log INFO "Successfully bound $real_home → $jail_home_dir (site content preserved)"
+    else
+        echo "DEBUG: Mount FAILED!" >&2
+        log ERROR "Failed to mount $real_home → $jail_home_dir"
+    fi
+    
+    # Set permissions on the mounted directory
+    chmod 755 "$user_jail/home"
+    chmod 755 "$jail_home_dir"
+    chown "$u:$u" "$jail_home_dir"
+    
+    # Add to fstab if not already there
+    if ! grep -qs "^$real_home[[:space:]]\+$jail_home_dir" /etc/fstab; then
+        echo "$real_home $jail_home_dir none bind 0 0" >> /etc/fstab
+        systemctl daemon-reload
+        log INFO "Added fstab entry for bind-mount"
+    fi
+    
+    # -----------------------------------------------------------------------
     # Set the user's shell safely
     local current=$(grep "^$u:" /etc/passwd)
     local prefix=${current%:*}
@@ -252,6 +266,7 @@ jail_user() {
     log INFO "Set shell to jk_chrootsh for $u"
     
     # Jail the user with the no-copy option, but handle potential failures
+    echo "DEBUG: Running jk_jailuser for $u..." >&2
     if jk_jailuser -v -j "$user_jail" -s /usr/sbin/jk_chrootsh -n "$u" 2>/dev/null || true; then
         # Fix any path issues in the jail's passwd file
         sed -i "s|/\./home/|/home/|g" "$user_jail/etc/passwd" 2>/dev/null
@@ -266,9 +281,10 @@ jail_user() {
         echo "DEBUG: User entry in passwd: $(grep "^$u:" /etc/passwd)" >&2
         echo "DEBUG: User entry in jail passwd: $(grep "^$u:" "$user_jail/etc/passwd")" >&2
         
-        # CRITICAL: Check if jail shell is set correctly
+        # Double-check the user's shell
         local final_shell=$(grep "^$u:" /etc/passwd | cut -d: -f7)
         echo "DEBUG: Final shell for $u: $final_shell" >&2
+        
         if [ "$final_shell" = "/usr/sbin/jk_chrootsh" ]; then
             log SUCCESS "User '$u' jailed with site content preserved at /home/$u"
         else
@@ -295,8 +311,12 @@ show_summary() {
 
 # Function to fix a user's home directory and shell
 fix_user() {
-    local u=$1 user_jail="$JAIL_ROOT/$u" jhome="$user_jail/home/$u"
+    local u=$1 
+    local user_jail="$JAIL_ROOT/$u" 
+    local jail_home_dir="$user_jail/home/$u"
+    
     echo "DEBUG: Fixing user $u" >&2
+    echo "DEBUG: user_jail=$user_jail, jail_home_dir=$jail_home_dir" >&2
     
     # Reset shell to bash directly in passwd file
     sed -i "s|^\($u:.*\):/usr/sbin/jk_chrootsh$|\1:/bin/bash|" /etc/passwd
@@ -307,21 +327,21 @@ fix_user() {
     echo "DEBUG: Reset home directory for $u" >&2
     
     # Unmount any existing mounts - VERIFY CORRECT PATH
-    if mountpoint -q "$jhome" 2>/dev/null; then
-        echo "DEBUG: Unmounting $jhome..." >&2
-        umount "$jhome"
-        echo "DEBUG: Unmounted $jhome" >&2
+    if mountpoint -q "$jail_home_dir" 2>/dev/null; then
+        echo "DEBUG: Unmounting $jail_home_dir..." >&2
+        umount "$jail_home_dir"
+        echo "DEBUG: Unmounted $jail_home_dir" >&2
     else
-        echo "DEBUG: No mount at $jhome to unmount" >&2
+        echo "DEBUG: No mount at $jail_home_dir to unmount" >&2
     fi
     
     # Remove fstab entry - VERIFY CORRECT PATH
-    if grep -qs "^/home/$u[[:space:]]\+$jhome" /etc/fstab; then
-        sed -i "\#^/home/$u[[:space:]]\+$jhome#d" /etc/fstab
+    if grep -qs "^/home/$u[[:space:]]\+$jail_home_dir" /etc/fstab; then
+        sed -i "\#^/home/$u[[:space:]]\+$jail_home_dir#d" /etc/fstab
         systemctl daemon-reload
         echo "DEBUG: Removed fstab entry and reloaded systemd" >&2
     else
-        echo "DEBUG: No fstab entry found for $jhome" >&2
+        echo "DEBUG: No fstab entry found for $jail_home_dir" >&2
     fi
     
     # Ensure home directory exists and is accessible
