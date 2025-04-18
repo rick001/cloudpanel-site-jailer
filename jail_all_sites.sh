@@ -1,5 +1,6 @@
 #!/bin/bash
-set -euo pipefail
+# Comment out the strict error handling for debugging
+# set -euo pipefail
 set -x  # debug
 
 ##############################
@@ -89,9 +90,22 @@ check_root() {
 }
 
 validate_config() {
+    echo "DEBUG: Entering validate_config" >&2
     local d; d="$(dirname "$DB_PATH")"
-    [ ! -d "$d" ] && { log ERROR "CloudPanel dir not found: $d"; exit 1; }
-    [ ! -f "$DB_PATH" ] && { log ERROR "DB not found at: $DB_PATH"; exit 1; }
+    echo "DEBUG: db_dir=$d" >&2
+    
+    if [ ! -d "$d" ]; then
+        echo "DEBUG: CloudPanel directory not found: $d" >&2
+        log ERROR "CloudPanel dir not found: $d"
+        exit 1
+    fi
+    
+    if [ ! -f "$DB_PATH" ]; then
+        echo "DEBUG: DB not found at: $DB_PATH" >&2
+        log ERROR "DB not found at: $DB_PATH"
+        exit 1
+    fi
+    echo "DEBUG: Config validation successful" >&2
 }
 
 install_dependencies() {
