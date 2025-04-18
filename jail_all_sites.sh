@@ -134,9 +134,16 @@ install_dependencies() {
 }
 
 initialize_jail() {
+    echo "DEBUG: Inside initialize_jail" >&2
     if [ ! -d "$JAIL_ROOT" ]; then
         log INFO "Initializing JailKit at $JAIL_ROOT"
         mkdir -p "$JAIL_ROOT"
+        
+        # Fix permissions on jail directory - this is the key fix
+        chown root:root "$JAIL_ROOT"
+        chmod 755 "$JAIL_ROOT"
+        echo "DEBUG: Set permissions on $JAIL_ROOT to 755" >&2
+        
         jk_init -v "$JAIL_ROOT" basicshell netutils ssh sftp scp editors
         mkdir -p "$JAIL_ROOT/usr/sbin" "$JAIL_ROOT/etc"
         cp /usr/sbin/jk_lsh "$JAIL_ROOT/usr/sbin/"; chmod 755 "$JAIL_ROOT/usr/sbin/jk_lsh"
@@ -144,6 +151,7 @@ initialize_jail() {
         grep -E '^(root|nobody):' /etc/group  >"$JAIL_ROOT/etc/group"
         chown -R root:root "$JAIL_ROOT"; chmod 755 "$JAIL_ROOT"
     fi
+    echo "DEBUG: Exiting initialize_jail" >&2
 }
 
 get_site_users() {
