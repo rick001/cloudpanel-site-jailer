@@ -20,6 +20,8 @@ NC='\033[0m' # No Color
 VERBOSE=false
 SKIP_CONFIRM=false
 FIX_MODE=false
+DIAGNOSE_MODE=false
+DIAGNOSE_USER=""
 
 #################################
 # Utility functions
@@ -82,7 +84,11 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose) VERBOSE=true; shift ;;
         -y|--yes)     SKIP_CONFIRM=true; shift ;;
         --fix)        FIX_MODE=true; shift ;;
-        --diagnose)   local u="$2"; if [ -z "$u" ]; then log ERROR "Must specify a user to diagnose"; exit 1; fi; diagnose_jail "$u"; exit 0 ;;
+        --diagnose)   
+            [[ -z "${2-:-}" ]] && { log ERROR "--diagnose needs a username"; exit 1; }
+            DIAGNOSE_MODE=true
+            DIAGNOSE_USER="$2"
+            shift 2 ;;
         *)            log ERROR "Unknown option $1"; show_help ;;
     esac
 done
@@ -448,14 +454,9 @@ main() {
     check_root
     echo "DEBUG: After check_root" >&2
     
-    # Check for diagnose flag
-    if [ "$1" = "--diagnose" ]; then
-        local u="$2"
-        if [ -z "$u" ]; then
-            log ERROR "Must specify a user to diagnose"
-            exit 1
-        fi
-        diagnose_jail "$u"
+    # Check for diagnose mode
+    if [ "$DIAGNOSE_MODE" = "true" ]; then
+        diagnose_jail "$DIAGNOSE_USER"
         exit 0
     fi
     
