@@ -99,14 +99,25 @@ init_base_jail() {
     chown root:root "$BASE_JAIL"
     chmod 755 "$BASE_JAIL"
 
+    # Initialize base jail
     if ! jk_init -v "$BASE_JAIL" basicshell netutils ssh sftp scp editors; then
         log ERROR "Base jail initialization failed"
         return 1
     fi
 
+    # Add critical system files
+    echo "/usr/sbin/jk_chrootsh" > "$BASE_JAIL/etc/shells"
+    echo "/bin/bash" >> "$BASE_JAIL/etc/shells"
+    echo "/bin/sh" >> "$BASE_JAIL/etc/shells"
+
+    # Copy essential libraries
+    mkdir -p "$BASE_JAIL/lib/x86_64-linux-gnu"
+    cp -p /lib/x86_64-linux-gnu/libc.so.6 "$BASE_JAIL/lib/x86_64-linux-gnu/"
+    cp -p /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$BASE_JAIL/lib/x86_64-linux-gnu/"
+
     jk_cp -v -k "$BASE_JAIL" /usr/sbin/jk_lsh /usr/sbin/jk_chrootsh
 
-    # Create essential devices with existence checks
+    # Create essential devices
     mkdir -p "$BASE_JAIL/dev"
     [ -e "$BASE_JAIL/dev/null" ] || mknod -m 666 "$BASE_JAIL/dev/null" c 1 3
     [ -e "$BASE_JAIL/dev/zero" ] || mknod -m 666 "$BASE_JAIL/dev/zero" c 1 5
@@ -129,11 +140,17 @@ create_user_jail() {
         }
     fi
 
+    # Preserve base users and add jailed user
     mkdir -p "${user_jail}/etc"
-    grep "^${u}:" /etc/passwd > "${user_jail}/etc/passwd"
-    grep "^${u}:" /etc/group > "${user_jail}/etc/group"
+    cp "${BASE_JAIL}/etc/passwd" "${user_jail}/etc/passwd"
+    cp "${BASE_JAIL}/etc/group" "${user_jail}/etc/group"
+    grep "^${u}:" /etc/passwd >> "${user_jail}/etc/passwd"
+    grep "^${u}:" /etc/group >> "${user_jail}/etc/group"
 
-    # Mark home directory mount as persistent
+    # Copy shell configuration
+    cp "${BASE_JAIL}/etc/shells" "${user_jail}/etc/shells"
+
+    # Home directory mount
     PERSISTENT_MOUNT=true
     safe_mount "$real_home" "$jail_home" || return 1
     PERSISTENT_MOUNT=false
