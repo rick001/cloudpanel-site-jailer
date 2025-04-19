@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail  # Strict error handling
+set -euo pipefail
 trap 'cleanup_on_exit' EXIT ERR
 
 ##############################
@@ -10,21 +10,22 @@ trap 'cleanup_on_exit' EXIT ERR
 DB_PATH="${DB_PATH:-/home/clp/htdocs/app/data/db.sq3}"
 JAIL_ROOT="${JAIL_ROOT:-/home/jail}"
 LOGFILE="${LOGFILE:-/var/log/jail_all_sites.log}"
-BASE_JAIL="${JAIL_ROOT}/_base"  # Shared base jail
+BASE_JAIL="${JAIL_ROOT}/_base"
 JK_PROFILE="cloudpanel"
 
 # Safety checks
 VALID_USERNAME_RE='^[a-z_][a-z0-9_-]*$'
 declare -a MOUNTED_PATHS=()
+PERSISTENT_MOUNT=false
 
-# Colors (only when running interactively)
+# Colors
 [ -t 1 ] && COLOR=true || COLOR=false
 RED=$($COLOR && echo -e '\033[0;31m')    GREEN=$($COLOR && echo -e '\033[0;32m')
 YELLOW=$($COLOR && echo -e '\033[1;33m') BLUE=$($COLOR && echo -e '\033[0;34m')
 NC=$($COLOR && echo -e '\033[0m')
 
 # Runtime flags
-VERBOSE=false SKIP_CONFIRM=false FIX_MODE=false DIAGNOSE_MODE=false DIAGNOSE_USER=""
+VERBOSE=false FIX_MODE=false DIAGNOSE_MODE=false DIAGNOSE_USER=""
 
 #################################
 # Utility Functions
@@ -33,6 +34,7 @@ VERBOSE=false SKIP_CONFIRM=false FIX_MODE=false DIAGNOSE_MODE=false DIAGNOSE_USE
 cleanup_on_exit() {
     local status=$?
     for path in "${MOUNTED_PATHS[@]}"; do
+        [[ "$path" == PERSISTENT:* ]] && continue
         if mountpoint -q "$path"; then
             umount "$path" && log INFO "Unmounted $path" || :
         fi
@@ -73,7 +75,11 @@ safe_mount() {
         return 0
     fi
     if mount --bind "$src" "$dst"; then
-        MOUNTED_PATHS+=("$dst")
+        if $PERSISTENT_MOUNT; then
+            MOUNTED_PATHS+=("PERSISTENT:$dst")
+        else
+            MOUNTED_PATHS+=("$dst")
+        fi
         log SUCCESS "Mounted $src → $dst"
         return 0
     fi
@@ -93,19 +99,19 @@ init_base_jail() {
     chown root:root "$BASE_JAIL"
     chmod 755 "$BASE_JAIL"
 
-    # Initialize with jailkit
     if ! jk_init -v "$BASE_JAIL" basicshell netutils ssh sftp scp editors; then
         log ERROR "Base jail initialization failed"
         return 1
     fi
 
-    # Add custom binaries
     jk_cp -v -k "$BASE_JAIL" /usr/sbin/jk_lsh /usr/sbin/jk_chrootsh
 
-    # Create essential devices
+    # Create essential devices with existence checks
     mkdir -p "$BASE_JAIL/dev"
-    mknod -m 666 "$BASE_JAIL/dev/null" c 1 3
-    mknod -m 666 "$BASE_JAIL/dev/zero" c 1 5
+    [ -e "$BASE_JAIL/dev/null" ] || mknod -m 666 "$BASE_JAIL/dev/null" c 1 3
+    [ -e "$BASE_JAIL/dev/zero" ] || mknod -m 666 "$BASE_JAIL/dev/zero" c 1 5
+    [ -e "$BASE_JAIL/dev/random" ] || mknod -m 666 "$BASE_JAIL/dev/random" c 1 8
+    [ -e "$BASE_JAIL/dev/urandom" ] || mknod -m 666 "$BASE_JAIL/dev/urandom" c 1 9
 
     log SUCCESS "Base jail created"
 }
@@ -116,7 +122,6 @@ create_user_jail() {
     local real_home="/home/${u}"
     local jail_home="${user_jail}${real_home}"
 
-    # Clone from base jail
     if [ ! -d "$user_jail" ]; then
         log INFO "Cloning base jail for $u"
         cp -a "$BASE_JAIL" "$user_jail" || {
@@ -124,21 +129,20 @@ create_user_jail() {
         }
     fi
 
-    # Configure user environment
     mkdir -p "${user_jail}/etc"
-    grep "^${u}:" /etc/passwd >> "${user_jail}/etc/passwd"
-    grep "^${u}:" /etc/group >> "${user_jail}/etc/group"
+    grep "^${u}:" /etc/passwd > "${user_jail}/etc/passwd"
+    grep "^${u}:" /etc/group > "${user_jail}/etc/group"
 
-    # Setup home directory binding
+    # Mark home directory mount as persistent
+    PERSISTENT_MOUNT=true
     safe_mount "$real_home" "$jail_home" || return 1
+    PERSISTENT_MOUNT=false
 
-    # Persistent mount
-    if ! grep -qF "$real_home $jail_home" /etc/fstab; then
+    if ! grep -qE "^${real_home}[[:space:]]+${jail_home}[[:space:]]+" /etc/fstab; then
         echo "$real_home $jail_home none bind 0 0" >> /etc/fstab
         log INFO "Added fstab entry for $u"
     fi
 
-    # Set restricted shell
     if usermod -s /usr/sbin/jk_chrootsh "$u"; then
         log SUCCESS "Configured jail for $u"
         return 0
@@ -153,15 +157,13 @@ unjail_user() {
     local user_jail="${JAIL_ROOT}/${u}"
     local jail_home="${user_jail}/home/${u}"
 
-    # Remove mounts
     if mountpoint -q "$jail_home"; then
-        umount "$jail_home" && log INFO "Unmounted $jail_home"
+        umount "$jail_home" || { log ERROR "Unmount failed for $jail_home"; return 1; }
+        log INFO "Unmounted $jail_home"
     fi
 
-    # Remove fstab entry
     sed -i "\|${jail_home}|d" /etc/fstab
 
-    # Restore shell
     if usermod -s /bin/bash "$u"; then
         log SUCCESS "Restored $u to normal shell"
         return 0
@@ -176,6 +178,7 @@ unjail_user() {
 #################################
 
 get_site_users() {
+    [ -f "$DB_PATH" ] || { log ERROR "Database not found: $DB_PATH"; exit 1; }
     sqlite3 "$DB_PATH" \
         "SELECT DISTINCT user FROM site WHERE user!='' AND user IS NOT NULL;" |
     while read -r u; do
@@ -184,14 +187,15 @@ get_site_users() {
 }
 
 check_dependencies() {
+    local required=("sqlite3" "jailkit")
     local missing=()
-    for cmd in sqlite3 jk_init jk_cp; do
-        command -v "$cmd" >/dev/null || missing+=("$cmd")
+    for pkg in "${required[@]}"; do
+        dpkg -l "$pkg" &>/dev/null || missing+=("$pkg")
     done
     
     if [ ${#missing[@]} -gt 0 ]; then
-        log INFO "Installing jailkit..."
-        apt-get update && apt-get install -y jailkit
+        log INFO "Installing missing packages..."
+        apt-get update && apt-get install -y "${missing[@]}"
     fi
 }
 
@@ -203,10 +207,12 @@ diagnose_user() {
     echo "Shell: $(getent passwd "$u" | cut -d: -f7)"
     echo "Jail Home: ${JAIL_ROOT}/${u}/home/${u}"
     echo "Mount Status: $(mountpoint -q "${JAIL_ROOT}/${u}/home/${u}" && echo "Mounted" || echo "Not Mounted")"
+    echo "Fstab Entry: $(grep -E "^/home/${u}[[:space:]]+" /etc/fstab || echo "None")"
     echo "=== End Diagnosis ==="
 }
 
 main() {
+    [ "$(id -u)" -eq 0 ] || { log ERROR "Must be run as root!"; exit 1; }
     check_dependencies
     init_base_jail || exit 1
 
@@ -222,7 +228,6 @@ main() {
         exit 0
     fi
 
-    # Main jailing process
     while read -r u; do
         log INFO "Processing user: $u"
         create_user_jail "$u" || log WARNING "Failed to jail $u"
@@ -231,11 +236,10 @@ main() {
     log SUCCESS "Operation completed"
 }
 
-# Argument parsing and execution
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
         -v|--verbose) VERBOSE=true; set -x ;;
-        -y|--yes) SKIP_CONFIRM=true ;;
         --fix) FIX_MODE=true ;;
         --diagnose) DIAGNOSE_MODE=true; DIAGNOSE_USER=$2; shift ;;
         -*) echo "Unknown option: $1"; exit 1 ;;
