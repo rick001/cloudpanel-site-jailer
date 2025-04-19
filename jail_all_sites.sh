@@ -99,32 +99,66 @@ init_base_jail() {
     chown root:root "$BASE_JAIL"
     chmod 755 "$BASE_JAIL"
 
-    # Initialize base jail
+    # Initialize with jailkit
     if ! jk_init -v "$BASE_JAIL" basicshell netutils ssh sftp scp editors; then
         log ERROR "Base jail initialization failed"
         return 1
     fi
 
-    # Add critical system files
-    echo "/usr/sbin/jk_chrootsh" > "$BASE_JAIL/etc/shells"
-    echo "/bin/bash" >> "$BASE_JAIL/etc/shells"
-    echo "/bin/sh" >> "$BASE_JAIL/etc/shells"
-
-    # Copy essential libraries
+    # Create essential directory structure for libraries
     mkdir -p "$BASE_JAIL/lib/x86_64-linux-gnu"
-    cp -p /lib/x86_64-linux-gnu/libc.so.6 "$BASE_JAIL/lib/x86_64-linux-gnu/"
-    cp -p /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$BASE_JAIL/lib/x86_64-linux-gnu/"
+    
+    # Copy critical shared libraries
+    log INFO "Copying system libraries..."
+    for lib in libc.so.6 ld-linux-x86-64.so.2; do
+        lib_path="/lib/x86_64-linux-gnu/$lib"
+        if [ -f "$lib_path" ]; then
+            cp -pv "$lib_path" "$BASE_JAIL/lib/x86_64-linux-gnu/"
+        else
+            log ERROR "Critical library missing: $lib_path"
+            return 1
+        fi
+    done
 
+    # Configure valid shells
+    log INFO "Configuring shell environment..."
+    mkdir -p "$BASE_JAIL/etc"
+    echo -e "/usr/sbin/jk_chrootsh\n/bin/bash\n/bin/sh" > "$BASE_JAIL/etc/shells"
+
+    # Add jailkit control binaries
     jk_cp -v -k "$BASE_JAIL" /usr/sbin/jk_lsh /usr/sbin/jk_chrootsh
 
-    # Create essential devices
+    # Create essential devices with safety checks
+    log INFO "Creating device nodes..."
     mkdir -p "$BASE_JAIL/dev"
-    [ -e "$BASE_JAIL/dev/null" ] || mknod -m 666 "$BASE_JAIL/dev/null" c 1 3
-    [ -e "$BASE_JAIL/dev/zero" ] || mknod -m 666 "$BASE_JAIL/dev/zero" c 1 5
-    [ -e "$BASE_JAIL/dev/random" ] || mknod -m 666 "$BASE_JAIL/dev/random" c 1 8
-    [ -e "$BASE_JAIL/dev/urandom" ] || mknod -m 666 "$BASE_JAIL/dev/urandom" c 1 9
+    declare -A devices=(
+        ["null"]="c 1 3"
+        ["zero"]="c 1 5"
+        ["random"]="c 1 8"
+        ["urandom"]="c 1 9"
+    )
+    for dev in "${!devices[@]}"; do
+        if [ ! -e "$BASE_JAIL/dev/$dev" ]; then
+            mknod -m 666 "$BASE_JAIL/dev/$dev" ${devices[$dev]}
+        fi
+    done
 
-    log SUCCESS "Base jail created"
+    # Verify base structure
+    log INFO "Verifying base jail integrity..."
+    local required_paths=(
+        "/usr/sbin/jk_chrootsh"
+        "/etc/shells"
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    )
+    for path in "${required_paths[@]}"; do
+        if [ ! -e "$BASE_JAIL$path" ]; then
+            log ERROR "Missing critical path: $BASE_JAIL$path"
+            return 1
+        fi
+    done
+
+    log SUCCESS "Base jail created with full dependencies"
+    return 0
 }
 
 create_user_jail() {
